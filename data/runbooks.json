@@ -1,0 +1,219 @@
+[
+  {
+    "id": "108d0f1c-a47c-4cf5-91bd-411591fe81ff",
+    "created_at": "2026-09-29T04:15:57.384708+00:00",
+    "updated_at": "2026-09-29T04:40:56.657512+00:00",
+    "revision": 4,
+    "filename": "26.10.02-RUNBOOK.md",
+    "source": "Release input only \u2014 no live integrations connected",
+    "release": {
+      "release_number": "26.10.02",
+      "title": "Main release",
+      "environment": "production",
+      "change_ticket": "",
+      "release_date": "2026-10-02",
+      "release_engineer": "Abc",
+      "application_owner": "Xyz",
+      "components": [
+        {
+          "name": "gssnav-coi-api",
+          "version": "26.10.02-gssnav-coi-api",
+          "kind": "service",
+          "depends_on": [],
+          "owner": "aaa",
+          "previous_version": null,
+          "additional_instructions": ""
+        },
+        {
+          "name": "gssnav-elastic-watch",
+          "version": "26.10.02-gssnav-elastic-watch",
+          "kind": "service",
+          "depends_on": [],
+          "owner": "bbb",
+          "previous_version": null,
+          "additional_instructions": ""
+        }
+      ],
+      "additional_information": ""
+    },
+    "risk": "standard",
+    "steps": [
+      {
+        "phase": "Prepare",
+        "items": [
+          "Review the change summary and confirm the scope is complete.",
+          "Confirm backup or recovery requirements for stateful components.",
+          "Record the currently running version for every component."
+        ]
+      },
+      {
+        "phase": "Release",
+        "items": [
+          "Deploy in the approved order, respecting declared dependencies.",
+          "Wait for readiness and available replicas before continuing.",
+          "Stop and investigate if warning events, restart growth, or new error signatures appear."
+        ]
+      },
+      {
+        "phase": "Validate",
+        "items": [
+          "Compare post-release health and error signals against the pre-release baseline.",
+          "Confirm each dependency is reachable and expected user paths work.",
+          "Record the outcome, final versions, and any follow-up work."
+        ]
+      },
+      {
+        "phase": "Rollback",
+        "items": [
+          "Use the last known-good version recorded before the release.",
+          "Restore state only through the approved backup/recovery runbook.",
+          "Notify the release owner and retain evidence for incident review."
+        ]
+      }
+    ],
+    "checks_required": [
+      "Confirm release window, change approval, and component owners.",
+      "Verify current workload health, alert state, and dependency availability.",
+      "Capture the running image/version and baseline error and restart rates.",
+      "Roll out one component at a time; pause if readiness, errors, or latency regress.",
+      "Validate user-critical paths and monitor for the agreed observation period.",
+      "Use the approved rollback procedure if a release guardrail fails."
+    ],
+    "evidence": {
+      "release_number": "26.10.02",
+      "additional_information": ""
+    }
+  },
+  {
+    "id": "efbbcd59-0ad5-46ef-b6de-1f42d9304dcf",
+    "created_at": "2026-09-29T03:24:32.476719+00:00",
+    "updated_at": "2026-09-29T03:24:32.477104+00:00",
+    "revision": 1,
+    "filename": "26.09.25-RUNBOOK.md",
+    "source": "Release input only \u2014 no live integrations connected",
+    "release": {
+      "release_number": "26.09.25",
+      "title": "SQL release",
+      "environment": "production",
+      "change_ticket": "",
+      "release_date": "",
+      "release_engineer": "",
+      "application_owner": "",
+      "components": [],
+      "additional_information": ""
+    },
+    "risk": "standard",
+    "steps": [
+      {
+        "phase": "Prepare",
+        "items": [
+          "Review the change summary and confirm the scope is complete.",
+          "Confirm backup or recovery requirements for stateful components.",
+          "Record the currently running version for every component."
+        ]
+      },
+      {
+        "phase": "Release",
+        "items": [
+          "Deploy in the approved order, respecting declared dependencies.",
+          "Wait for readiness and available replicas before continuing.",
+          "Stop and investigate if warning events, restart growth, or new error signatures appear."
+        ]
+      },
+      {
+        "phase": "Validate",
+        "items": [
+          "Compare post-release health and error signals against the pre-release baseline.",
+          "Confirm each dependency is reachable and expected user paths work.",
+          "Record the outcome, final versions, and any follow-up work."
+        ]
+      },
+      {
+        "phase": "Rollback",
+        "items": [
+          "Use the last known-good version recorded before the release.",
+          "Restore state only through the approved backup/recovery runbook.",
+          "Notify the release owner and retain evidence for incident review."
+        ]
+      }
+    ],
+    "checks_required": [
+      "Confirm release window, change approval, and component owners.",
+      "Verify current workload health, alert state, and dependency availability.",
+      "Capture the running image/version and baseline error and restart rates.",
+      "Roll out one component at a time; pause if readiness, errors, or latency regress.",
+      "Validate user-critical paths and monitor for the agreed observation period.",
+      "Use the approved rollback procedure if a release guardrail fails."
+    ],
+    "evidence": {
+      "release_number": "26.09.25",
+      "additional_information": ""
+    }
+  },
+  {
+    "id": "bceb850f-fc95-4813-b432-d07c0f37ccbc",
+    "created_at": "2026-09-28T16:46:22.818700+00:00",
+    "updated_at": "2026-09-29T03:24:07.482365+00:00",
+    "revision": 4,
+    "filename": "26.09.18-RUNBOOK.md",
+    "source": "Release input only \u2014 no live integrations connected",
+    "release": {
+      "release_number": "26.09.18",
+      "title": "Main  Code release",
+      "environment": "production",
+      "change_ticket": "",
+      "release_date": "",
+      "release_engineer": "",
+      "application_owner": "",
+      "components": [],
+      "additional_information": ""
+    },
+    "risk": "standard",
+    "steps": [
+      {
+        "phase": "Prepare",
+        "items": [
+          "Review the change summary and confirm the scope is complete.",
+          "Confirm backup or recovery requirements for stateful components.",
+          "Record the currently running version for every component."
+        ]
+      },
+      {
+        "phase": "Release",
+        "items": [
+          "Deploy in the approved order, respecting declared dependencies.",
+          "Wait for readiness and available replicas before continuing.",
+          "Stop and investigate if warning events, restart growth, or new error signatures appear."
+        ]
+      },
+      {
+        "phase": "Validate",
+        "items": [
+          "Compare post-release health and error signals against the pre-release baseline.",
+          "Confirm each dependency is reachable and expected user paths work.",
+          "Record the outcome, final versions, and any follow-up work."
+        ]
+      },
+      {
+        "phase": "Rollback",
+        "items": [
+          "Use the last known-good version recorded before the release.",
+          "Restore state only through the approved backup/recovery runbook.",
+          "Notify the release owner and retain evidence for incident review."
+        ]
+      }
+    ],
+    "checks_required": [
+      "Confirm release window, change approval, and component owners.",
+      "Verify current workload health, alert state, and dependency availability.",
+      "Capture the running image/version and baseline error and restart rates.",
+      "Roll out one component at a time; pause if readiness, errors, or latency regress.",
+      "Validate user-critical paths and monitor for the agreed observation period.",
+      "Use the approved rollback procedure if a release guardrail fails."
+    ],
+    "evidence": {
+      "release_number": "26.09.18",
+      "additional_information": ""
+    }
+  }
+]
