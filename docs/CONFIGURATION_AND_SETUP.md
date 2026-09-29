@@ -48,6 +48,7 @@ Keep non-sensitive settings separate from credentials.
 | Helm values-file pattern | Component production values location | Helm values / ConfigMap; normally `app_manifest/*/prd/values_prd.yaml` |
 | Release calendar source | Annual release-team calendar; read-only | Helm values / ConfigMap |
 | ArgoCD URL and application pattern | Health, sync, and last successful deployed image evidence | Helm values / ConfigMap |
+| Prometheus URL and approved queries | Pre/post release error rate, latency, and availability evidence | Helm values / ConfigMap |
 | Confluence base URL, space, parent page | Official runbook publishing location | Helm values / ConfigMap |
 | Jira token | Read-only Jira API authentication | Kubernetes Secret and GitHub Actions secret |
 | GitHub App credentials | Read access to repository/PR content; write only if committing runbooks | Kubernetes Secret |
@@ -89,6 +90,9 @@ stringData:
   GITHUB_APP_INSTALLATION_ID: "replace-with-installation-id"
   GITHUB_APP_PRIVATE_KEY: "replace-through-approved-secret-management"
   RELEASEPILOT_WORKFLOW_TOKEN: "replace-with-a-long-random-shared-token"
+  RELEASEPILOT_ARGOCD_TOKEN: "replace-through-approved-secret-management"
+  RELEASEPILOT_PROMETHEUS_TOKEN: "replace-through-approved-secret-management"
+  RELEASEPILOT_CONFLUENCE_TOKEN: "replace-through-approved-secret-management"
 ```
 
 The Deployment template should reference the keys, rather than placing their values in the Deployment:
@@ -236,8 +240,10 @@ Confluence is the official runbook repository. Configure the existing space and 
 - [ ] ReleasePilot remains read-only and does not have deployment, rollback, or workload-write permissions.
 - [ ] Audit GitHub workflow runs, generated runbook commits, and deployment approvals.
 
-## 9. Current status and next implementation step
+## 9. Connector implementation status
 
-The local UI and GitHub/Helm comparison workflow are available now. Jira and direct GitHub API connectors are configuration-ready but must be implemented and tested against your approved Jira and GitHub endpoints before they are enabled in production.
+The application includes the connector code and API contracts for Jira Fix Version discovery, GitHub/Helm workflow evidence, ArgoCD evidence, Prometheus checks, release readiness, human approvals, Confluence preview/publishing, and release dashboard status.
 
-Do not enable a connector until its credentials, repository access, network policy, expected release-branch flow, and returned fields have been verified in a non-production environment.
+No connector is active merely because this code is deployed. It becomes active only after its URL, public metadata, runtime secret, outbound network rule, and least-privilege service account are supplied. Test each connector against the approved non-production endpoint before enabling it for production.
+
+The direct GitHub App API is intentionally not used for deployment actions. The approved GitHub Actions workflow remains the source of Git/Helm discovery and the only place that writes the generated Markdown file. This separation keeps ReleasePilot read-only toward deployment systems.

@@ -5,6 +5,7 @@ const outputCard = document.querySelector('#output-card');
 const output = document.querySelector('#runbook');
 const savedRunbookList = document.querySelector('#saved-runbook-list');
 const knownComponentSelect = document.querySelector('#known-component');
+const integrationStatus = document.querySelector('#integration-status');
 
 const knownComponents = [
   { name: 'gss-ui', kind: 'frontend' },
@@ -80,6 +81,20 @@ async function loadSavedRunbooks() {
 
 document.querySelector('#refresh-runbooks').addEventListener('click', loadSavedRunbooks);
 loadSavedRunbooks();
+
+async function loadIntegrationStatus() {
+  const response = await fetch('/api/status');
+  if (!response.ok) { integrationStatus.innerHTML = '<p class="form-note">Connection readiness is unavailable right now.</p>'; return; }
+  const data = await response.json();
+  const visible = [
+    ['Jira release scope', data.integrations.jira],
+    ['GitHub and Helm discovery', data.integrations.github],
+    ['ArgoCD deployment evidence', data.integrations.argocd],
+    ['Confluence publishing', data.integrations.confluence],
+  ];
+  integrationStatus.innerHTML = visible.map(([name, state]) => `<div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(state)}</span></div>`).join('');
+}
+loadIntegrationStatus();
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();

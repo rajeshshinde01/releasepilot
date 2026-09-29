@@ -65,6 +65,21 @@ Manual component entry remains available for an exceptional release, but it is n
 
 The future release planner should generate evidence-backed steps, require human approval for any action, and provide links to approved deployment and rollback workflows rather than running them itself.
 
+## Connector-ready release control plane
+
+The application code now includes the production integration endpoints. They are safe to deploy before credentials exist: each endpoint returns a clear **not configured** response until its HTTPS URL and runtime secret are supplied.
+
+- `GET /api/discovery/jira/{release_number}` — reads the configured Jira Fix Version; it never changes Jira.
+- `GET /api/runbooks/{id}/argocd` — reads application sync, health, revision, and reported images from ArgoCD.
+- `GET /api/runbooks/{id}/metrics` — executes only the approved Prometheus queries configured for error rate, latency, and availability.
+- `GET /api/runbooks/{id}/readiness` — produces the pre-publish checklist, open actions, and required pre/post-release evidence.
+- `PUT /api/runbooks/{id}/approvals` — records the five required human confirmations.
+- `GET /api/runbooks/{id}/confluence-preview` — returns native Confluence storage content for review.
+- `POST /api/runbooks/{id}/publish/confluence` — creates or updates one official release page only after explicit approval and workflow-approved publishing are configured.
+- `GET /api/dashboard` — returns release status, risks, publishing state, open actions, and connector readiness for a future UI/dashboard.
+
+The application never deploys, syncs, rolls back, scales, or changes Kubernetes/ArgoCD resources. GitHub Actions and ArgoCD remain the approved action planes.
+
 ## Integration configuration
 
 Administrators can configure safe integration metadata through:

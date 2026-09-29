@@ -6,6 +6,9 @@ import hmac
 import json
 import os
 import re
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
+from urllib.request import Request as UrlRequest, urlopen
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -59,6 +62,30 @@ class ReleaseRequest(BaseModel):
     additional_information: str = Field(default="", max_length=2000)
 
 
+class ApprovalChecklist(BaseModel):
+    release_engineer_confirmed: bool = False
+    application_owner_confirmed: bool = False
+    change_ticket_confirmed: bool = False
+    rollback_confirmed: bool = False
+    validation_signoff_confirmed: bool = False
+    approved_by: str = Field(default="", max_length=120)
+    approved_at: str = Field(default="", max_length=80)
+
+
+class ReleaseApprovalRequest(BaseModel):
+    release_engineer_confirmed: bool = False
+    application_owner_confirmed: bool = False
+    change_ticket_confirmed: bool = False
+    rollback_confirmed: bool = False
+    validation_signoff_confirmed: bool = False
+    approved_by: str = Field(default="", max_length=120)
+
+
+class ConfluencePublishRequest(BaseModel):
+    approved_for_publishing: bool = False
+    actor: str = Field(default="", max_length=120)
+
+
 class Runbook(BaseModel):
     id: str
     created_at: str
@@ -71,6 +98,8 @@ class Runbook(BaseModel):
     steps: list[dict]
     checks_required: list[str]
     evidence: dict = Field(default_factory=dict)
+    approvals: ApprovalChecklist = Field(default_factory=ApprovalChecklist)
+    publication: dict = Field(default_factory=dict)
 
 
 RUNBOOKS: dict[str, Runbook] = {}
@@ -106,6 +135,8 @@ class GitHubSettings(BaseModel):
     app_id_environment_variable: str = Field(default="GITHUB_APP_ID", max_length=120)
     installation_id_environment_variable: str = Field(default="GITHUB_APP_INSTALLATION_ID", max_length=120)
     private_key_environment_variable: str = Field(default="GITHUB_APP_PRIVATE_KEY", max_length=120)
+    workflow_file: str = Field(default="releasepilot-runbook.yml", max_length=200)
+    release_branch_required: bool = True
 
 
 class ReleaseCalendarSettings(BaseModel):
@@ -125,6 +156,23 @@ class ArgoCDSettings(BaseModel):
     verify_healthy_synced: bool = True
 
 
+class KubernetesSettings(BaseModel):
+    enabled: bool = False
+    namespace: str = Field(default="gss", max_length=120)
+    kubeconfig_environment_variable: str = Field(default="KUBECONFIG", max_length=120)
+    workload_label_selector: str = Field(default="", max_length=240)
+    read_only: bool = True
+
+
+class PrometheusSettings(BaseModel):
+    base_url: str = Field(default="", max_length=500)
+    token_environment_variable: str = Field(default="RELEASEPILOT_PROMETHEUS_TOKEN", max_length=120)
+    error_rate_query: str = Field(default="", max_length=1000)
+    latency_query: str = Field(default="", max_length=1000)
+    availability_query: str = Field(default="", max_length=1000)
+    query_timeout_seconds: int = Field(default=15, ge=2, le=60)
+
+
 class ConfluenceSettings(BaseModel):
     base_url: str = Field(default="", max_length=500)
     space_key: str = Field(default="", max_length=80)
@@ -141,6 +189,8 @@ class IntegrationSettings(BaseModel):
     release_calendar: ReleaseCalendarSettings = Field(default_factory=ReleaseCalendarSettings)
     argocd: ArgoCDSettings = Field(default_factory=ArgoCDSettings)
     confluence: ConfluenceSettings = Field(default_factory=ConfluenceSettings)
+    kubernetes: KubernetesSettings = Field(default_factory=KubernetesSettings)
+    prometheus: PrometheusSettings = Field(default_factory=PrometheusSettings)
 
 
 def load_integration_settings() -> IntegrationSettings:
@@ -224,6 +274,89 @@ def require_admin_token(token: str | None) -> None:
     expected = os.getenv("RELEASEPILOT_ADMIN_TOKEN")
     if expected and not hmac.compare_digest(token or "", expected):
         raise HTTPException(status_code=401, detail="Administrator authentication failed.")
+
+
+def configured_url(value: str) -> bool:
+    return bool(value and value.startswith("https://"))
+
+
+def external_json(url: str, *, token: str = "", method: str = "GET", payload: dict | None = None, timeout: int = 20) -> dict:
+    """Minimal, redacted HTTP client used only by configured read/publish connectors."""
+    headers = {"Accept": "application/json"}
+    body = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    request = UrlRequest(url, data=body, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=timeout) as response:  # nosec B310: destination is administrator-configured HTTPS.
+            return json.loads(response.read().decode("utf-8") or "{}")
+    except HTTPError as error:
+        raise HTTPException(status_code=502, detail=f"External service returned HTTP {error.code}.") from error
+    except (URLError, TimeoutError) as error:
+        raise HTTPException(status_code=502, detail="Could not reach the configured external service.") from error
+
+
+def connector_state(settings: IntegrationSettings) -> dict[str, str]:
+    return {
+        "jira": "ready" if configured_url(settings.jira.base_url) and bool(os.getenv(settings.jira.token_environment_variable)) else "not configured",
+        "github": "ready" if settings.github.repository and bool(os.getenv(settings.github.app_id_environment_variable)) else "not configured",
+        "argocd": "ready" if configured_url(settings.argocd.base_url) and bool(os.getenv(settings.argocd.token_environment_variable)) else "not configured",
+        "kubernetes": "ready" if settings.kubernetes.enabled else "not configured",
+        "prometheus": "ready" if configured_url(settings.prometheus.base_url) else "not configured",
+        "confluence": "ready" if configured_url(settings.confluence.base_url) and settings.confluence.space_key and settings.confluence.parent_page_id and bool(os.getenv(settings.confluence.token_environment_variable)) else "not configured",
+        "release_calendar": "ready" if configured_url(settings.release_calendar.source_url) else "not configured",
+    }
+
+
+def runbook_open_actions(runbook: Runbook) -> list[str]:
+    actions: list[str] = []
+    release = runbook.release
+    if not release.components:
+        actions.append("Discover the production release scope before approval.")
+    if not release.change_ticket.strip():
+        actions.append("Add the approved change ticket.")
+    if not release.release_engineer.strip():
+        actions.append("Confirm the release engineer.")
+    if not release.application_owner.strip():
+        actions.append("Confirm the application IT owner.")
+    for component in release.components:
+        if not component.owner:
+            actions.append(f"Confirm the owner for {component.name}.")
+        if not component.previous_version:
+            actions.append(f"Obtain the previous successful image for {component.name} from ArgoCD.")
+    approval = runbook.approvals
+    labels = {
+        "release_engineer_confirmed": "release engineer confirmation",
+        "application_owner_confirmed": "application owner confirmation",
+        "change_ticket_confirmed": "change-ticket confirmation",
+        "rollback_confirmed": "rollback confirmation",
+        "validation_signoff_confirmed": "validation sign-off",
+    }
+    for name, label in labels.items():
+        if not getattr(approval, name):
+            actions.append(f"Record {label}.")
+    return actions
+
+
+def jira_release_scope(release_number: str, settings: IntegrationSettings) -> list[dict]:
+    if not configured_url(settings.jira.base_url):
+        raise HTTPException(status_code=409, detail="Jira is not configured. Add the HTTPS URL and deploy the Jira token secret first.")
+    token = os.getenv(settings.jira.token_environment_variable, "")
+    if not token:
+        raise HTTPException(status_code=409, detail="Jira is configured but its runtime token secret is unavailable.")
+    jql = f'project = "{settings.jira.project_key}" AND fixVersion = "{release_number}" ORDER BY key'
+    query = urlencode({"jql": jql, "fields": f"summary,issuetype,{settings.jira.component_field},{settings.jira.downtime_field},{settings.jira.migration_field}"})
+    response = external_json(f"{settings.jira.base_url.rstrip('/')}/rest/api/2/search?{query}", token=token)
+    issues = []
+    for item in response.get("issues", []):
+        fields = item.get("fields", {})
+        components = [entry.get("name", "") for entry in fields.get(settings.jira.component_field, []) if entry.get("name")]
+        issue_type = str(fields.get("issuetype", {}).get("name", "other")).lower()
+        issues.append({"key": item.get("key", ""), "summary": fields.get("summary", ""), "issue_type": issue_type, "components": components})
+    return issues
 
 
 class JiraIssue(BaseModel):
@@ -527,6 +660,37 @@ body{{margin:0;background:#f4f7f5;color:#182c26;font:15px/1.55 Arial,sans-serif}
 </main></body></html>"""
 
 
+def render_confluence_storage(runbook: Runbook) -> str:
+    """Native Confluence storage format; secrets and raw log data are intentionally excluded."""
+    release = runbook.release
+    rows = "".join(
+        f"<tr><th>{escape(label)}</th><td>{escape(str(value or 'Confirm before release'))}</td></tr>"
+        for label, value in [
+            ("Release version", release.release_number), ("Environment", "Production"),
+            ("Change ticket", release.change_ticket), ("Release date", release.release_date),
+            ("Release engineer", release.release_engineer), ("Application IT owner", release.application_owner),
+            ("Deployment method", "GitOps (GitHub + ArgoCD)"), ("Rollback method", "ArgoCD revision rollback"),
+            ("Risk", runbook.risk.title()),
+        ]
+    )
+    components = "".join(
+        f"<tr><td>{escape(component.name)}</td><td><code>{escape(component.version)}</code></td><td><code>{escape(component.previous_version or 'Confirm in ArgoCD History')}</code></td><td>{escape(component.owner or 'Confirm before release')}</td></tr>"
+        for component in release.components
+    ) or "<tr><td colspan='4'>Release scope is not discovered yet.</td></tr>"
+    checks = "".join(f"<li>{escape(check)}</li>" for check in runbook.checks_required)
+    prior = "".join(
+        f"<tr><td>{escape(component.name)}</td><td><code>{escape(component.previous_version or 'Confirm in ArgoCD History')}</code></td></tr>"
+        for component in release.components
+    ) or "<tr><td>Release scope not discovered</td><td>Confirm in ArgoCD History</td></tr>"
+    return f"""<h1>{escape(release.title)}</h1>
+<h2>1. Release information</h2><table><tbody>{rows}</tbody></table>
+<h2>2. Release scope</h2><h3>2.1 Components included</h3><table><tbody><tr><th>Component</th><th>Target image tag</th><th>Previous successful image tag</th><th>Owner</th></tr>{components}</tbody></table>
+<h2>3. Release readiness checks</h2><ul>{checks}</ul>
+<h2>4. Deployment procedure</h2><h3>4.1 Change ticket update</h3><p>Update the approved change record with the release version, scope, approvals, and evidence links.</p><h3>4.2 Promote UAT to PROD</h3><p>Use the approved GitHub pull request and deployment workflow only.</p><h3>4.3 ArgoCD synchronization</h3><p>Sync only applications in the release scope and confirm Healthy and Synced status.</p><h3>4.4 Deployment verification</h3><p>Verify target images, workload readiness, warning events, and agreed service checks.</p>
+<h2>5. Rollback plan</h2><h3>5.1 Rollback criteria</h3><p>Critical functionality unavailable, unhealthy application, material error growth, or business owner request.</p><h3>5.2 Rollback procedure</h3><p>Use ArgoCD History and Rollback to select the approved previous stable revision, then confirm Healthy and Synced status.</p><h3>5.3 Previous successful deployed versions</h3><table><tbody><tr><th>Component</th><th>Previous stable version</th></tr>{prior}</tbody></table>
+<p><em>Generated by ReleasePilot. Deployment and rollback remain approved GitHub and ArgoCD actions.</em></p>"""
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "releasepilot"}
@@ -544,22 +708,132 @@ def restore_runbook_history() -> None:
 @app.get("/api/status")
 def status():
     settings = load_integration_settings()
+    states = connector_state(settings)
     return {
         "service": "ReleasePilot",
         "mode": "planning",
         "integrations": {
-            "release_calendar": "configured" if settings.release_calendar.source_url else "not configured — release team calendar remains the authoritative source",
-            "github": "configured" if settings.github.repository else "workflow template available — repository not configured",
-            "kubernetes": "planned — read-only workload discovery",
+            "release_calendar": states["release_calendar"] if states["release_calendar"] == "ready" else "not configured — release team calendar remains the authoritative source",
+            "github": states["github"] if states["github"] == "ready" else "workflow template available — repository or GitHub App not configured",
+            "kubernetes": states["kubernetes"],
             "ci_cd": "GitHub workflow manifest supported",
-            "prometheus": "not configured",
+            "prometheus": states["prometheus"],
             "clustermind": "not configured",
-            "jira": "configured" if settings.jira.base_url else "not configured",
-            "argocd": "configured" if settings.argocd.base_url else "not configured",
-            "confluence": "configured" if settings.confluence.base_url and settings.confluence.space_key and settings.confluence.parent_page_id else "not configured",
+            "jira": states["jira"],
+            "argocd": states["argocd"],
+            "confluence": states["confluence"],
         },
         "message": "Runbooks are generated from release input until live sources are configured.",
     }
+
+
+@app.get("/api/dashboard")
+def dashboard():
+    settings = load_integration_settings()
+    records = sorted(RUNBOOKS.values(), key=lambda item: item.updated_at, reverse=True)
+    return {
+        "connector_state": connector_state(settings),
+        "runbooks": [
+            {
+                "id": item.id,
+                "release_number": item.release.release_number,
+                "title": item.release.title,
+                "release_date": item.release.release_date,
+                "risk": item.risk,
+                "revision": item.revision,
+                "published": bool(item.publication.get("url")),
+                "open_actions": runbook_open_actions(item),
+            }
+            for item in records
+        ],
+        "message": "The release calendar remains read-only and authoritative. Deployment systems are never changed by this dashboard.",
+    }
+
+
+@app.get("/api/discovery/jira/{release_number}")
+def discover_jira_release(release_number: str):
+    """Read the configured Fix Version scope. It does not create or change a Jira issue."""
+    settings = load_integration_settings()
+    issues = jira_release_scope(release_number, settings)
+    return {"release_number": release_number, "source": "Jira Fix Version", "issues": issues}
+
+
+@app.get("/api/runbooks/{runbook_id}/readiness")
+def runbook_readiness(runbook_id: str):
+    runbook = RUNBOOKS.get(runbook_id)
+    if not runbook:
+        raise HTTPException(status_code=404, detail="Runbook not found.")
+    settings = load_integration_settings()
+    actions = runbook_open_actions(runbook)
+    return {
+        "runbook_id": runbook.id,
+        "ready_to_publish": not actions,
+        "risk": runbook.risk,
+        "open_actions": actions,
+        "connectors": connector_state(settings),
+        "checks": {
+            "pre_release": ["readiness and rollout state", "pod/container restart count", "warning events", "Prometheus error rate, latency, availability"],
+            "post_release": ["target image verification", "Healthy and Synced ArgoCD status", "baseline comparison", "business-path validation"],
+        },
+    }
+
+
+@app.put("/api/runbooks/{runbook_id}/approvals", response_model=Runbook)
+def update_runbook_approvals(runbook_id: str, request: ReleaseApprovalRequest):
+    runbook = RUNBOOKS.get(runbook_id)
+    if not runbook:
+        raise HTTPException(status_code=404, detail="Runbook not found.")
+    approval = ApprovalChecklist(**request.model_dump())
+    if all([
+        approval.release_engineer_confirmed, approval.application_owner_confirmed,
+        approval.change_ticket_confirmed, approval.rollback_confirmed, approval.validation_signoff_confirmed,
+    ]):
+        approval.approved_at = datetime.now(timezone.utc).isoformat()
+    runbook.approvals = approval
+    return store_runbook(runbook, runbook.release.release_number)
+
+
+@app.get("/api/runbooks/{runbook_id}/argocd")
+def argocd_evidence(runbook_id: str):
+    runbook = RUNBOOKS.get(runbook_id)
+    if not runbook:
+        raise HTTPException(status_code=404, detail="Runbook not found.")
+    settings = load_integration_settings()
+    if not configured_url(settings.argocd.base_url):
+        raise HTTPException(status_code=409, detail="ArgoCD is not configured. Add its HTTPS URL and runtime token secret during deployment.")
+    token = os.getenv(settings.argocd.token_environment_variable, "")
+    if not token:
+        raise HTTPException(status_code=409, detail="ArgoCD is configured but its runtime token secret is unavailable.")
+    applications = []
+    for component in runbook.release.components:
+        application = settings.argocd.application_name_pattern.format(component=component.name)
+        body = external_json(f"{settings.argocd.base_url.rstrip('/')}/api/v1/applications/{quote(application, safe='')}", token=token)
+        status = body.get("status", {})
+        applications.append({
+            "component": component.name,
+            "application": application,
+            "sync": status.get("sync", {}).get("status", "Unknown"),
+            "health": status.get("health", {}).get("status", "Unknown"),
+            "revision": status.get("sync", {}).get("revision", "Unknown"),
+            "images": status.get("summary", {}).get("images", []),
+        })
+    return {"source": "ArgoCD read-only application API", "applications": applications}
+
+
+@app.get("/api/runbooks/{runbook_id}/metrics")
+def prometheus_evidence(runbook_id: str):
+    if runbook_id not in RUNBOOKS:
+        raise HTTPException(status_code=404, detail="Runbook not found.")
+    settings = load_integration_settings()
+    if not configured_url(settings.prometheus.base_url):
+        raise HTTPException(status_code=409, detail="Prometheus is not configured. Add its HTTPS URL and approved queries during deployment.")
+    token = os.getenv(settings.prometheus.token_environment_variable, "")
+    queries = {"error_rate": settings.prometheus.error_rate_query, "latency": settings.prometheus.latency_query, "availability": settings.prometheus.availability_query}
+    results = {}
+    for name, query in queries.items():
+        if query:
+            results[name] = external_json(f"{settings.prometheus.base_url.rstrip('/')}/api/v1/query?{urlencode({'query': query})}", token=token, timeout=settings.prometheus.query_timeout_seconds)
+    return {"source": "Prometheus read-only query API", "metrics": results, "missing_queries": [name for name, query in queries.items() if not query]}
 
 
 @app.get("/api/admin/integrations", response_model=IntegrationSettings)
@@ -627,6 +901,47 @@ def runbook_document(runbook_id: str):
     if not runbook:
         raise HTTPException(status_code=404, detail="Runbook not found.")
     return {"filename": runbook.filename, "content": render_markdown(runbook)}
+
+
+@app.get("/api/runbooks/{runbook_id}/confluence-preview")
+def confluence_preview(runbook_id: str):
+    runbook = RUNBOOKS.get(runbook_id)
+    if not runbook:
+        raise HTTPException(status_code=404, detail="Runbook not found.")
+    return {"title": runbook.release.title, "storage_format": render_confluence_storage(runbook)}
+
+
+@app.post("/api/runbooks/{runbook_id}/publish/confluence")
+def publish_to_confluence(runbook_id: str, request: ConfluencePublishRequest):
+    """Create or update the one official Confluence page for this production release."""
+    runbook = RUNBOOKS.get(runbook_id)
+    if not runbook:
+        raise HTTPException(status_code=404, detail="Runbook not found.")
+    if not request.approved_for_publishing:
+        raise HTTPException(status_code=422, detail="Explicit approval is required before publishing to Confluence.")
+    settings = load_integration_settings()
+    if connector_state(settings)["confluence"] != "ready":
+        raise HTTPException(status_code=409, detail="Confluence is not configured. Add the base URL, space, parent page ID, and runtime token secret during deployment.")
+    if settings.confluence.publish_mode != "workflow-approved":
+        raise HTTPException(status_code=409, detail="Confluence publishing is configured for manual approval. Set the approved workflow mode only after governance review.")
+    token = os.getenv(settings.confluence.token_environment_variable, "")
+    title = settings.confluence.page_title_template.format(release_number=runbook.release.release_number)
+    root = settings.confluence.base_url.rstrip("/")
+    lookup = external_json(f"{root}/rest/api/content?{urlencode({'spaceKey': settings.confluence.space_key, 'title': title, 'expand': 'version'})}", token=token)
+    storage = render_confluence_storage(runbook)
+    results = lookup.get("results", [])
+    if results:
+        page = results[0]
+        page_id = page["id"]
+        payload = {"id": page_id, "type": "page", "title": title, "space": {"key": settings.confluence.space_key}, "body": {"storage": {"value": storage, "representation": "storage"}}, "version": {"number": int(page.get("version", {}).get("number", 0)) + 1}}
+        published = external_json(f"{root}/rest/api/content/{page_id}", token=token, method="PUT", payload=payload)
+    else:
+        payload = {"type": "page", "title": title, "space": {"key": settings.confluence.space_key}, "ancestors": [{"id": settings.confluence.parent_page_id}], "body": {"storage": {"value": storage, "representation": "storage"}}}
+        published = external_json(f"{root}/rest/api/content", token=token, method="POST", payload=payload)
+    links = published.get("_links", {})
+    runbook.publication = {"provider": "Confluence", "page_id": published.get("id", ""), "url": f"{root}{links.get('webui', '')}", "published_at": datetime.now(timezone.utc).isoformat(), "published_by": request.actor or "approved workflow"}
+    store_runbook(runbook, runbook.release.release_number)
+    return {"published": True, **runbook.publication}
 
 
 @app.get("/api/runbooks/{runbook_id}/history")
