@@ -6,6 +6,7 @@ const output = document.querySelector('#runbook');
 const savedRunbookList = document.querySelector('#saved-runbook-list');
 const knownComponentSelect = document.querySelector('#known-component');
 const integrationStatus = document.querySelector('#integration-status');
+document.head.insertAdjacentHTML('beforeend', '<style>@media (max-width:900px){.release-controls,.section-heading{grid-template-columns:1fr}.form-submit{align-items:flex-start;flex-direction:column}}@media (max-width:600px){.form-submit .button,.component-actions-row .button{width:100%}.component-actions-row{align-items:stretch;flex-direction:column}}</style>');
 
 const knownComponents = [
   { name: 'gss-ui', kind: 'frontend' },
@@ -71,12 +72,40 @@ function displayDate(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 
+function componentChanges(current, previous) {
+  if (!previous) return '<p class="form-note">A comparison appears after this runbook is updated at least once.</p>';
+  const before = new Map(previous.release.components.map(component => [component.name.toLowerCase(), component]));
+  const after = new Map(current.release.components.map(component => [component.name.toLowerCase(), component]));
+  const changes = [];
+  after.forEach((component, name) => {
+    const old = before.get(name);
+    if (!old) changes.push(`${component.name} was added with ${component.version}.`);
+    else if (old.version !== component.version) changes.push(`${component.name}: ${old.version} → ${component.version}.`);
+  });
+  before.forEach((component, name) => { if (!after.has(name)) changes.push(`${component.name} was removed from the release scope.`); });
+  return changes.length ? items(changes) : '<p class="form-note">No component or image-tag change from the preceding revision.</p>';
+}
+
+async function renderReleaseControls(runbook) {
+  const [readinessResponse, historyResponse] = await Promise.all([fetch(`/api/runbooks/${encodeURIComponent(runbook.id)}/readiness`), fetch(`/api/runbooks/${encodeURIComponent(runbook.id)}/history`)]);
+  if (!readinessResponse.ok) return;
+  const readiness = await readinessResponse.json();
+  const history = historyResponse.ok ? await historyResponse.json() : [];
+  const previous = history.find(item => item.revision === runbook.revision - 1);
+  const state = readiness.ready_to_publish ? 'Ready to publish' : runbook.approvals.approved_at ? 'Approved — details still needed' : 'Draft — needs review';
+  const confluenceReady = readiness.connectors.confluence === 'ready';
+  const container = document.createElement('section');
+  container.className = 'release-controls';
+  container.innerHTML = `<section class="control-panel"><p class="eyebrow">RUNBOOK STATUS</p><h3>${escapeHtml(state)}</h3><p>Revision ${runbook.revision} · ${history.length} saved revision${history.length === 1 ? '' : 's'}</p></section><section class="control-panel"><p class="eyebrow">READINESS CHECKLIST</p><h3>${readiness.open_actions.length ? `${readiness.open_actions.length} item${readiness.open_actions.length === 1 ? '' : 's'} to complete` : 'All required items complete'}</h3>${readiness.open_actions.length ? items(readiness.open_actions.slice(0, 6)) : '<p class="form-note">The release has the required planning evidence. Review before publishing.</p>'}</section><section class="control-panel"><p class="eyebrow">WHAT CHANGED</p><h3>Since revision ${previous ? previous.revision : '—'}</h3>${componentChanges(runbook, previous)}</section><section class="control-panel confluence-panel"><p class="eyebrow">CONFLUENCE</p><h3>${confluenceReady ? 'Ready after approval' : 'Connection not configured'}</h3><p>${confluenceReady ? 'Publishing will update the official page for this release number; it will not create a duplicate page.' : `The official page will be named “${escapeHtml(runbook.release.release_number)} GDC Release Runbook” once the Confluence deployment configuration is supplied.`}</p><button class="button secondary" type="button" ${confluenceReady ? '' : 'disabled'}>Publish to Confluence</button></section>`;
+  output.append(container);
+}
+
 async function loadSavedRunbooks() {
   const response = await fetch('/api/runbooks');
   if (!response.ok) { savedRunbookList.innerHTML = '<p class="form-note">Saved runbooks are unavailable right now.</p>'; return; }
   const runbooks = await response.json();
   if (!runbooks.length) { savedRunbookList.innerHTML = '<p class="form-note">No production runbooks have been created yet.</p>'; return; }
-  savedRunbookList.innerHTML = runbooks.map(runbook => `<article class="saved-runbook"><div><strong>${escapeHtml(runbook.filename)}</strong><span>${escapeHtml(runbook.release.title)} · updated ${escapeHtml(displayDate(runbook.updated_at))} · revision ${runbook.revision}</span></div><div class="runbook-links"><a class="download-runbook" target="_blank" rel="noopener" href="/api/runbooks/${encodeURIComponent(runbook.id)}/view">View</a><a class="download-runbook" href="/api/runbooks/${encodeURIComponent(runbook.id)}/markdown">Markdown</a></div></article>`).join('');
+  savedRunbookList.innerHTML = runbooks.map(runbook => `<article class="saved-runbook"><div class="runbook-summary"><strong>${escapeHtml(runbook.filename)}</strong><span>${escapeHtml(runbook.release.title)} · updated ${escapeHtml(displayDate(runbook.updated_at))} · revision ${runbook.revision}</span></div><div class="runbook-links" aria-label="Runbook actions"><a class="download-runbook" target="_blank" rel="noopener" href="/api/runbooks/${encodeURIComponent(runbook.id)}/view">View runbook</a><a class="download-runbook" href="/api/runbooks/${encodeURIComponent(runbook.id)}/markdown">Download Markdown</a></div></article>`).join('');
 }
 
 document.querySelector('#refresh-runbooks').addEventListener('click', loadSavedRunbooks);
@@ -143,5 +172,6 @@ form.addEventListener('submit', async (event) => {
   const scope = data.release.components.length ? `<div class="table-scroll"><table class="release-scope-table"><thead><tr><th>Component</th><th>Target image tag</th><th>Previous stable image tag</th><th>Owner</th><th>Type</th></tr></thead><tbody>${data.release.components.map(c => `<tr><td><strong>${escapeHtml(c.name)}</strong></td><td><code>${escapeHtml(c.version)}</code></td><td><code>${escapeHtml(c.previous_version || 'Confirm in ArgoCD History')}</code></td><td>${escapeHtml(c.owner || 'To be confirmed')}</td><td>${escapeHtml(c.kind)}</td></tr>${c.additional_instructions ? `<tr class="instructions-row"><td colspan="5"><b>Component instructions:</b> ${escapeHtml(c.additional_instructions)}</td></tr>` : ''}`).join('')}</tbody></table></div>` : '<p>Release scope has not been discovered yet. Run the approved GitHub workflow to compare the release branch with <strong>prd</strong>; it will add the changed components and image versions automatically.</p>';
   const notes = data.evidence.additional_information ? `<section><h3>Additional information</h3><p>${escapeHtml(data.evidence.additional_information)}</p></section>` : '';
   output.innerHTML = `<p class="source">${escapeHtml(data.filename)} · updated revision ${data.revision} · ${escapeHtml(data.source)}</p><p class="runbook-links"><a class="download-runbook" target="_blank" rel="noopener" href="/api/runbooks/${encodeURIComponent(data.id)}/view">View formatted runbook</a><a class="download-runbook" href="/api/runbooks/${encodeURIComponent(data.id)}/markdown">Download Markdown source</a></p><p class="form-note">Submitting this release number again updates this same runbook file.</p><section><h3>1. Release information</h3><div class="runbook-details">${releaseInfo}</div></section><section class="component-summary"><h3>2. Release scope</h3>${scope}</section>${notes}<section><h3>3. Release readiness checks</h3>${items(data.checks_required)}</section>${data.steps.map(step => `<section><h3>${escapeHtml(step.phase)}</h3>${items(step.items)}</section>`).join('')}`;
+  renderReleaseControls(data);
   loadSavedRunbooks();
 });
