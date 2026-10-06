@@ -1,0 +1,13 @@
+apiVersion: v2
+name: releasepilot
+description: Read-only production release runbook planning and publishing service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - release-management
+  - runbook
+  - gitops
+  - argocd
+maintainers:
+  - name: ReleasePilot Team

@@ -1,0 +1,105 @@
+# ReleasePilot Helm chart defaults. Do not place credentials in this file.
+replicaCount: 1
+
+image:
+  repository: releasepilot
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false # ReleasePilot stores runbook history under /app/data.
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: releasepilot.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 75
+
+# Persist structured runbook history and safe connector settings. Markdown is
+# normally retained in Git and Confluence; this volume keeps the UI history.
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessModes: ["ReadWriteOnce"]
+  size: 1Gi
+
+# Safe, non-secret variables. Add only values understood by the application.
+env:
+  releasepilotDataDir: /app/data
+  extra: []
+  # - name: SOME_NON_SECRET_SETTING
+  #   value: example
+
+# Reference a pre-created Secret. The chart does not create secrets and never
+# accepts secret values through Helm values.
+secrets:
+  existingSecret: ""
+  keys:
+    adminToken: RELEASEPILOT_ADMIN_TOKEN
+    workflowToken: RELEASEPILOT_WORKFLOW_TOKEN
+    jiraToken: RELEASEPILOT_JIRA_TOKEN
+    argocdToken: RELEASEPILOT_ARGOCD_TOKEN
+    prometheusToken: RELEASEPILOT_PROMETHEUS_TOKEN
+    confluenceToken: RELEASEPILOT_CONFLUENCE_TOKEN
+    githubAppId: GITHUB_APP_ID
+    githubAppInstallationId: GITHUB_APP_INSTALLATION_ID
+    githubAppPrivateKey: GITHUB_APP_PRIVATE_KEY
+
+networkPolicy:
+  enabled: true
+  # Keep DNS available. Add specific egress CIDRs/rules for approved Jira,
+  # GitHub, ArgoCD, Prometheus and Confluence endpoints in your environment.
+  additionalEgress: []
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

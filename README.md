@@ -2,6 +2,12 @@
 
 For deployment configuration, Jira/GitHub setup, security controls, and the official workflow, see [Configuration and setup](docs/CONFIGURATION_AND_SETUP.md).
 
+For the step-by-step workflow, Jira, GitHub, ReleasePilot, and Confluence setup, see [Workflow and integration setup](docs/WORKFLOW_INTEGRATIONS.md).
+
+For the end-to-end UAT, production, UI, approval, publishing, and history journey, see [Application flow](docs/APPLICATION_FLOW.md).
+
+For Kubernetes deployment, see the [Helm chart](chart/README.md). The chart uses a pre-created secret reference for credentials and preserves UI runbook history in a persistent volume by default.
+
 ReleasePilot creates a reviewable release runbook from a declared release scope. It is deliberately read-only: it never deploys, restarts, scales, or changes a workload.
 
 ## Current capabilities
@@ -24,7 +30,12 @@ The generated runbook uses the following safeguards:
 - Helm components without a matching Jira component are explicitly flagged for human review.
 - The result records repository/ref provenance and the generated release evidence is retained as a workflow artifact.
 
-Copy `.github/workflows/releasepilot-runbook.example.yml` and the `releasepilot/scripts/` directory into the deployment repository. In GitHub Actions, select **Run workflow**, choose the branch under **Use workflow from**, enter the release number and the current production baseline ref, and optionally add release notes. The workflow creates or updates `runbooks/<release>-RUNBOOK.md` on that branch. It requires repository write permission so it can commit the runbook.
+Copy the workflow templates and the `releasepilot/scripts/` directory into the deployment repository. Use two separately named active workflows:
+
+- `.github/workflows/releasepilot-uat-validation.yml` — copied from `releasepilot-uat-validation.example.yml`; read-only validation evidence only.
+- `.github/workflows/releasepilot-production-runbook.yml` — copied from `releasepilot-runbook.example.yml`; the only workflow allowed to create or update `runbooks/<release>-RUNBOOK.md`.
+
+In GitHub Actions, select **Run workflow**, choose the branch under **Use workflow from**, enter the release number and baseline ref, and optionally add release notes. The production workflow requires repository write permission because it commits the runbook.
 
 ### Weekly UAT → Production release process
 
@@ -97,7 +108,7 @@ The Jira settings are intentionally configuration-only at this stage. The future
 
 ## Runbook naming and repeat workflow runs
 
-ReleasePilot creates runbooks only for the production promotion. The GitHub workflow saves one stable filename, `26.09.18-RUNBOOK.md`, under `runbooks/`. A second or later production workflow run for the same release number updates that same file without creating a duplicate. The local UI does the same. SIT, test, and UAT evidence remain part of the promotion process, but ReleasePilot does not create separate runbooks for them.
+ReleasePilot creates runbooks only for the production promotion. The production workflow saves one stable filename, `26.09.18-RUNBOOK.md`, under `runbooks/`. A second or later production workflow run for the same release number updates that same file without creating a duplicate. The local UI does the same. The UAT workflow creates an expiring GitHub Actions artifact containing validation evidence; it cannot create a Markdown runbook, update the ReleasePilot UI, or publish to Confluence.
 
 For UI-created runbooks, the current Markdown file is saved in this project as `runbooks/<release>-RUNBOOK.md`. It is the only user-facing runbook file for that release and is updated in place. Structured audit history is retained separately in `data/runbooks.json` and `data/runbook-history.json`; when runbooks are committed through GitHub Actions, Git also records the file history. The generated result includes a **Download** link. The UI is intentionally a manual fallback: it shows the components and images entered by the user. Automatic discovery of all changed component images happens in the GitHub workflow by comparing the selected release branch against the production baseline.
 

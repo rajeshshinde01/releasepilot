@@ -848,8 +848,15 @@ def update_integration_settings(
     x_releasepilot_admin_token: str | None = Header(default=None),
 ):
     require_admin_token(x_releasepilot_admin_token)
-    if settings.jira.base_url and not settings.jira.base_url.startswith("https://"):
-        raise HTTPException(status_code=422, detail="Jira URL must use HTTPS.")
+    for name, value in {
+        "Jira": settings.jira.base_url,
+        "ArgoCD": settings.argocd.base_url,
+        "Confluence": settings.confluence.base_url,
+        "Release calendar": settings.release_calendar.source_url,
+        "Prometheus": settings.prometheus.base_url,
+    }.items():
+        if value and not value.startswith("https://"):
+            raise HTTPException(status_code=422, detail=f"{name} URL must use HTTPS.")
     save_integration_settings(settings)
     return settings
 
@@ -922,8 +929,10 @@ def publish_to_confluence(runbook_id: str, request: ConfluencePublishRequest):
     settings = load_integration_settings()
     if connector_state(settings)["confluence"] != "ready":
         raise HTTPException(status_code=409, detail="Confluence is not configured. Add the base URL, space, parent page ID, and runtime token secret during deployment.")
-    if settings.confluence.publish_mode != "workflow-approved":
-        raise HTTPException(status_code=409, detail="Confluence publishing is configured for manual approval. Set the approved workflow mode only after governance review.")
+    # Both supported modes require the explicit approval flag above.  The mode
+    # controls who normally initiates publishing (a reviewer in the UI or an
+    # approved workflow); it must not prevent a reviewer from updating the
+    # official page after they have explicitly approved it.
     token = os.getenv(settings.confluence.token_environment_variable, "")
     title = settings.confluence.page_title_template.format(release_number=runbook.release.release_number)
     root = settings.confluence.base_url.rstrip("/")

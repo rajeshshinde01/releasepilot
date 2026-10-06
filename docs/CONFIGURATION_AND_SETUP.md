@@ -1,5 +1,7 @@
 # ReleasePilot configuration and setup
 
+For a concise operational walkthrough of GitHub Actions secrets, Kubernetes Secrets, first UAT validation, first production run, and Confluence publishing, see [Workflow and integration setup](WORKFLOW_INTEGRATIONS.md).
+
 ReleasePilot creates and maintains **production-only** release runbooks. It is read-only: it does not deploy, restart, scale, roll back, or modify workloads.
 
 The intended official process is:
@@ -130,10 +132,11 @@ Use a least-privilege service account and NetworkPolicy. ReleasePilot needs outb
 
 ## 4. GitHub repository and workflow setup
 
-The GitHub Actions workflow is the normal production runbook path. Copy these files into the deployment repository:
+Use two GitHub Actions workflows: an evidence-only UAT validation workflow and a production-only runbook workflow. Copy these files into the deployment repository:
 
 ```text
 releasepilot/.github/workflows/releasepilot-runbook.example.yml
+releasepilot/.github/workflows/releasepilot-uat-validation.example.yml
 releasepilot/scripts/compare_prod_values.py
 releasepilot/scripts/generate_runbook.py
 ```
@@ -141,20 +144,25 @@ releasepilot/scripts/generate_runbook.py
 Place the workflow at:
 
 ```text
-.github/workflows/releasepilot-runbook.yml
+.github/workflows/releasepilot-uat-validation.yml
+.github/workflows/releasepilot-production-runbook.yml
 ```
 
-The workflow:
+The production workflow:
 
 1. Runs from the selected UAT-to-PROD release branch.
 2. Uses `prd` as the default production baseline.
 3. Finds changed `app_manifest/<component>/prd/values_prd.yaml` files.
 4. Compares the target and previous production image values.
 5. Detects replica, resource, configuration-reference, and secret-reference changes without exposing secret values.
-6. Generates or updates `runbooks/<release-number>-RUNBOOK.md`.
-7. Commits the updated runbook to the selected branch.
+6. Optionally queries Jira for the matching Fix Version and adds only the approved release-scope fields to the evidence.
+7. Generates or updates `runbooks/<release-number>-RUNBOOK.md`.
+8. Optionally sends the redacted evidence to ReleasePilot. The same release number updates one runbook in the UI.
+9. Commits the updated runbook to the selected branch.
 
 Grant the workflow only the permissions it needs. If it commits the generated Markdown file, it needs `contents: write`. If branch protection blocks direct writes, let the workflow create an approved pull request instead.
+
+The UAT workflow has `contents: read` only. It compares the UAT values path (default `app_manifest/*/uat/values_uat.yaml`) against the approved SIT baseline, retains a redacted validation artifact, and may read Jira scope. It never creates a release runbook, calls the production ReleasePilot API, commits files, or publishes to Confluence.
 
 ### GitHub Actions secrets
 
@@ -164,7 +172,11 @@ Configure these as repository or organisation secrets only when the correspondin
 | --- | --- |
 | `RELEASEPILOT_WORKFLOW_TOKEN` | GitHub Actions calling the optional ReleasePilot API |
 | `RELEASEPILOT_JIRA_TOKEN` | GitHub Actions querying Jira directly, if that design is chosen |
+| `JIRA_BASE_URL` | GitHub Actions Jira address (secret, because it can be an internal hostname) |
+| `RELEASEPILOT_API_URL` | Publicly reachable ReleasePilot API address for workflow-to-UI sync |
 | GitHub App private key | Preferably held by ReleasePilot; only add to Actions when the workflow itself must call GitHub as the App |
+
+Configure `JIRA_PROJECT_KEY` as a GitHub Actions **variable** (not a secret). The workflow deliberately continues without Jira or ReleasePilot API configuration, so teams can introduce one connector at a time.
 
 The workflow token must exactly match the `RELEASEPILOT_WORKFLOW_TOKEN` value in the Kubernetes Secret.
 
@@ -208,7 +220,9 @@ After the one-time configuration, a release engineer should only need to:
 1. Open GitHub Actions from the UAT-to-PROD release branch.
 2. Enter the release number, such as `26.10.02`.
 3. Start the approved workflow.
-4. Review the generated or updated Markdown runbook and approve the release through existing controls.
+4. The workflow compares only changed `app_manifest/<component>/prd/values_prd.yaml` files with the production baseline and, when configured, obtains the Jira Fix Version scope.
+5. Review the single generated runbook in GitHub or ReleasePilot. Complete the approval checklist.
+6. Select **Publish / update Confluence** in ReleasePilot. The page title is stable for the release number, so Confluence updates the existing official page and retains its own page history.
 
 ReleasePilot will discover component changes from the Helm comparison. After Jira is enabled, it also adds the verified Jira release scope. Manual component entry in the local UI remains only for exceptional cases.
 
@@ -227,9 +241,31 @@ ReleasePilot can then validate that a requested production runbook belongs to th
 
 When configured, ArgoCD provides the last revision that was both **Healthy** and **Synced**. That revision is the authoritative source for a “previous successful deployed image tag”; the `prd` Git value is only a fallback previous production value.
 
-Confluence is the official runbook repository. Configure the existing space and parent page where the release team already keeps runbooks. ReleasePilot will create one page per release number and update the same page on later runs, preserving Confluence page history. Start in `manual-approval` publishing mode; use `workflow-approved` only after the release workflow and approvals are verified.
+Confluence is the official runbook repository. Configure the existing space and parent page where the release team already keeps runbooks. ReleasePilot will create one page per release number and update the same page on later runs, preserving Confluence page history. Both supported modes require an explicit approval: `manual-approval` is for a reviewer using the UI; `workflow-approved` is for an approved automation identity.
 
-## 8. Security checklist
+## 8. End-to-end flow and ownership
+
+```text
+GitHub Actions input: release number
+  → optional Jira Fix Version lookup
+  → Git/Helm production-values comparison
+  → generated Markdown committed to the deployment repository
+  → optional secure API callback updates the one ReleasePilot runbook
+  → reviewer completes the approval checklist
+  → explicit Confluence publish updates the matching official page
+```
+
+The integration boundaries are intentionally small:
+
+- **GitHub Actions** discovers the repository changes and generates the auditable file.
+- **Jira** provides the planned scope; it is never treated as proof of deployment.
+- **ReleasePilot** presents the evidence, checklist, revision history, and publishing control.
+- **ArgoCD** is read-only evidence for deployed revision, sync state, health, and rollback target.
+- **Confluence** is the long-term official reference and owns page history.
+
+If a connector is unavailable, ReleasePilot labels the evidence source accordingly instead of inventing data. It never deploys, synchronizes, or rolls back an application.
+
+## 9. Security checklist
 
 - [ ] All secrets come from approved secret management and are mounted as Kubernetes Secrets.
 - [ ] No secret value is rendered in generated evidence or Markdown.

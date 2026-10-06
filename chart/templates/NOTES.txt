@@ -1,0 +1,12 @@
+ReleasePilot has been installed.
+
+{{- if .Values.ingress.enabled }}
+Open https://{{ (index .Values.ingress.hosts 0).host }} after your ingress controller has reconciled.
+{{- else }}
+To access locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "releasepilot.fullname" . }} 8095:{{ .Values.service.port }}
+Then open http://127.0.0.1:8095.
+{{- end }}
+
+Before enabling connectors, save only safe endpoint metadata through the Settings page.
+Store all tokens and private keys in the Secret referenced by secrets.existingSecret.

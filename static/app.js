@@ -6,7 +6,11 @@ const output = document.querySelector('#runbook');
 const savedRunbookList = document.querySelector('#saved-runbook-list');
 const knownComponentSelect = document.querySelector('#known-component');
 const integrationStatus = document.querySelector('#integration-status');
-document.head.insertAdjacentHTML('beforeend', '<style>@media (max-width:900px){.release-controls,.section-heading{grid-template-columns:1fr}.form-submit{align-items:flex-start;flex-direction:column}}@media (max-width:600px){.form-submit .button,.component-actions-row .button{width:100%}.component-actions-row{align-items:stretch;flex-direction:column}}</style>');
+const dashboardContent = document.querySelector('#release-dashboard-content');
+const connectionForm = document.querySelector('#connection-form');
+const connectionNote = document.querySelector('#connection-note');
+let integrationSettings = null;
+document.head.insertAdjacentHTML('beforeend', '<style>.dashboard-actions{margin-top:7px;padding:0;border:0;background:transparent;color:#315d50;font-size:12px;font-weight:700;text-decoration:underline;cursor:pointer}.action-dialog{position:relative;min-width:min(560px,calc(100vw - 32px));padding:8px}.action-dialog h2{margin:0 0 8px;font:28px Georgia,serif}.action-dialog .close{position:absolute;top:5px;right:8px;padding:3px 7px;border:0;background:transparent;font-size:22px;cursor:pointer}.action-dialog-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}.action-dialog-footer .button{margin:0}@media (max-width:900px){.release-controls,.section-heading{grid-template-columns:1fr}.form-submit{align-items:flex-start;flex-direction:column}}@media (max-width:600px){.form-submit .button,.component-actions-row .button{width:100%}.component-actions-row,.dashboard-heading,.dashboard-runbook,.release-discovery,.connection-heading,.connection-submit{align-items:stretch;flex-direction:column}.connection-fields{grid-template-columns:1fr}.connection-fields .wide{grid-column:auto}.action-dialog{min-width:0}.action-dialog-footer{flex-direction:column}.action-dialog-footer .button{width:100%}}</style>');
 
 const knownComponents = [
   { name: 'gss-ui', kind: 'frontend' },
@@ -56,6 +60,21 @@ document.querySelector('#add-known-component').addEventListener('click', () => {
   knownComponentSelect.value = '';
 });
 
+document.querySelector('#discover-release').addEventListener('click', async () => {
+  const releaseNumber = document.querySelector('#release-number').value.trim();
+  const note = document.querySelector('#discovery-note');
+  if (!releaseNumber) { note.textContent = 'Enter the release number first.'; return; }
+  note.textContent = 'Checking the configured Jira release scope…';
+  const response = await fetch(`/api/discovery/jira/${encodeURIComponent(releaseNumber)}`);
+  const data = await response.json();
+  if (!response.ok) { note.textContent = data.detail || 'Jira scope could not be checked.'; return; }
+  const components = [...new Set(data.issues.flatMap(issue => issue.components))];
+  note.textContent = components.length ? `Jira found ${components.length} component${components.length === 1 ? '' : 's'}. Add image tags through the approved GitHub and Helm workflow before creating the runbook.` : 'Jira did not return a component scope for this Fix Version.';
+  components.forEach(name => {
+    if (![...document.querySelectorAll('[data-field=name]')].some(field => field.value.trim().toLowerCase() === name.toLowerCase())) componentRow({ name, kind: inferredKind(name) });
+  });
+});
+
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char])); }
 function items(list) { return `<ul>${list.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`; }
 
@@ -70,6 +89,51 @@ function inferredKind(name) {
 
 function displayDate(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+}
+
+async function loadDashboard() {
+  const response = await fetch('/api/dashboard');
+  if (!response.ok) { dashboardContent.innerHTML = '<p class="form-note">The release overview is unavailable right now.</p>'; return; }
+  const data = await response.json();
+  if (!data.runbooks.length) { dashboardContent.innerHTML = '<p class="form-note">No production runbooks yet. Start with the next approved release date.</p>'; return; }
+  dashboardContent.innerHTML = data.runbooks.slice(0, 6).map(runbook => {
+    const state = runbook.published ? 'Published' : runbook.open_actions.length ? `${runbook.open_actions.length} action${runbook.open_actions.length === 1 ? '' : 's'} open` : 'Ready for review';
+    const next = runbook.open_actions[0] || 'Review and approve the release plan.';
+    return `<article class="dashboard-runbook"><div><strong>${escapeHtml(runbook.release_number)}</strong><span>${escapeHtml(runbook.title)} · ${escapeHtml(runbook.release_date || 'Date to be confirmed')}</span></div><div><span class="risk ${escapeHtml(runbook.risk)}">${escapeHtml(state)}</span><p>${escapeHtml(next)}</p><button class="text-button dashboard-actions" type="button" data-runbook-id="${escapeHtml(runbook.id)}">Review open actions</button></div></article>`;
+  }).join('');
+}
+document.querySelector('#refresh-dashboard').addEventListener('click', loadDashboard);
+dashboardContent.addEventListener('click', event => {
+  const button = event.target.closest('.dashboard-actions');
+  if (button) showOpenActions(button.dataset.runbookId);
+});
+loadDashboard();
+
+async function loadRunbookForEditing(runbookId) {
+  const response = await fetch('/api/runbooks'); if (!response.ok) return null;
+  return (await response.json()).find(runbook => runbook.id === runbookId) || null;
+}
+function populateReleaseForm(runbook) {
+  document.querySelector('#release-number').value = runbook.release.release_number;
+  document.querySelector('#title').value = runbook.release.title || '';
+  document.querySelector('#change-ticket').value = runbook.release.change_ticket || '';
+  document.querySelector('#release-date').value = runbook.release.release_date || '';
+  document.querySelector('#release-engineer').value = runbook.release.release_engineer || '';
+  document.querySelector('#application-owner').value = runbook.release.application_owner || '';
+  document.querySelector('#additional-information').value = runbook.release.additional_information || '';
+  componentList.innerHTML = '';
+  runbook.release.components.forEach(component => componentRow({ name: component.name, version: component.version, kind: component.kind, owner: component.owner || '', previousVersion: component.previous_version || '', dependsOn: (component.depends_on || []).join(', '), additionalInstructions: component.additional_instructions || '' }));
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+async function showOpenActions(runbookId) {
+  const [readinessResponse, runbook] = await Promise.all([fetch(`/api/runbooks/${encodeURIComponent(runbookId)}/readiness`), loadRunbookForEditing(runbookId)]);
+  if (!readinessResponse.ok || !runbook) { alert('The release actions could not be loaded.'); return; }
+  const readiness = await readinessResponse.json();
+  let dialog = document.querySelector('#open-actions-dialog');
+  if (!dialog) { dialog = document.createElement('dialog'); dialog.id = 'open-actions-dialog'; document.body.append(dialog); }
+  dialog.innerHTML = `<form method="dialog" class="action-dialog"><button class="close" value="cancel" aria-label="Close">×</button><p class="eyebrow">${escapeHtml(runbook.release.release_number)} · RELEASE ACTIONS</p><h2>${readiness.open_actions.length ? `${readiness.open_actions.length} item${readiness.open_actions.length === 1 ? '' : 's'} to complete` : 'No open actions'}</h2><p class="intro">Complete the missing release details in the editor, then submit the same release number to update its one runbook.</p>${readiness.open_actions.length ? items(readiness.open_actions) : '<p class="form-note">The planning checklist is complete. Review approvals before publishing.</p>'}<div class="action-dialog-footer"><button class="button secondary" value="cancel">Close</button><button class="button" id="edit-runbook" type="button">Edit this runbook</button></div></form>`;
+  dialog.querySelector('#edit-runbook').onclick = () => { dialog.close(); populateReleaseForm(runbook); };
+  dialog.showModal();
 }
 
 function componentChanges(current, previous) {
@@ -96,7 +160,40 @@ async function renderReleaseControls(runbook) {
   const confluenceReady = readiness.connectors.confluence === 'ready';
   const container = document.createElement('section');
   container.className = 'release-controls';
-  container.innerHTML = `<section class="control-panel"><p class="eyebrow">RUNBOOK STATUS</p><h3>${escapeHtml(state)}</h3><p>Revision ${runbook.revision} · ${history.length} saved revision${history.length === 1 ? '' : 's'}</p></section><section class="control-panel"><p class="eyebrow">READINESS CHECKLIST</p><h3>${readiness.open_actions.length ? `${readiness.open_actions.length} item${readiness.open_actions.length === 1 ? '' : 's'} to complete` : 'All required items complete'}</h3>${readiness.open_actions.length ? items(readiness.open_actions.slice(0, 6)) : '<p class="form-note">The release has the required planning evidence. Review before publishing.</p>'}</section><section class="control-panel"><p class="eyebrow">WHAT CHANGED</p><h3>Since revision ${previous ? previous.revision : '—'}</h3>${componentChanges(runbook, previous)}</section><section class="control-panel confluence-panel"><p class="eyebrow">CONFLUENCE</p><h3>${confluenceReady ? 'Ready after approval' : 'Connection not configured'}</h3><p>${confluenceReady ? 'Publishing will update the official page for this release number; it will not create a duplicate page.' : `The official page will be named “${escapeHtml(runbook.release.release_number)} GDC Release Runbook” once the Confluence deployment configuration is supplied.`}</p><button class="button secondary" type="button" ${confluenceReady ? '' : 'disabled'}>Publish to Confluence</button></section>`;
+  container.innerHTML = `<section class="control-panel"><p class="eyebrow">RUNBOOK STATUS</p><h3>${escapeHtml(state)}</h3><p>Revision ${runbook.revision} · ${history.length} saved revision${history.length === 1 ? '' : 's'}</p></section><section class="control-panel"><p class="eyebrow">READINESS CHECKLIST</p><h3>${readiness.open_actions.length ? `${readiness.open_actions.length === 1 ? '1 item' : `${readiness.open_actions.length} items`} to complete` : 'All required items complete'}</h3>${readiness.open_actions.length ? items(readiness.open_actions.slice(0, 6)) : '<p class="form-note">The release has the required planning evidence. Review before publishing.</p>'}</section><section class="control-panel"><p class="eyebrow">WHAT CHANGED</p><h3>Since revision ${previous ? previous.revision : '—'}</h3>${componentChanges(runbook, previous)}</section><section class="control-panel confluence-panel"><p class="eyebrow">CONFLUENCE</p><h3>${confluenceReady ? 'Ready after approval' : 'Connection not configured'}</h3><p>${confluenceReady ? 'Publishing updates the official page for this release number; it never creates a duplicate page.' : `The official page will be named “${escapeHtml(runbook.release.release_number)} GDC Release Runbook” once the Confluence deployment configuration is supplied.`}</p><button class="button secondary" id="publish-confluence" type="button" ${confluenceReady ? '' : 'disabled'}>Publish / update Confluence</button><p class="form-note" id="confluence-note"></p></section>`;
+  const publishButton = container.querySelector('#publish-confluence');
+  if (publishButton) publishButton.addEventListener('click', async () => {
+    const actor = window.prompt('Record the name of the person approving this publication (optional):', runbook.approvals.approved_by || '') || '';
+    publishButton.disabled = true;
+    const response = await fetch(`/api/runbooks/${encodeURIComponent(runbook.id)}/publish/confluence`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approved_for_publishing: true, actor: actor.trim() }) });
+    const result = await response.json();
+    const note = container.querySelector('#confluence-note');
+    if (!response.ok) { note.textContent = result.detail || 'Confluence publishing could not be completed.'; publishButton.disabled = false; return; }
+    note.innerHTML = `Published to <a href="${escapeHtml(result.url)}" target="_blank" rel="noopener">the official Confluence page</a>.`;
+    publishButton.textContent = 'Confluence updated';
+    loadDashboard();
+  });
+  const approvalPanel = document.createElement('section');
+  approvalPanel.className = 'control-panel approval-panel';
+  approvalPanel.innerHTML = `<p class="eyebrow">APPROVAL CHECKLIST</p><h3>Confirm release readiness</h3><form id="approval-form"><label><input type="checkbox" name="release_engineer_confirmed" ${runbook.approvals.release_engineer_confirmed ? 'checked' : ''}> Release engineer confirmed</label><label><input type="checkbox" name="application_owner_confirmed" ${runbook.approvals.application_owner_confirmed ? 'checked' : ''}> Application owner confirmed</label><label><input type="checkbox" name="change_ticket_confirmed" ${runbook.approvals.change_ticket_confirmed ? 'checked' : ''}> Change ticket approved</label><label><input type="checkbox" name="rollback_confirmed" ${runbook.approvals.rollback_confirmed ? 'checked' : ''}> Rollback plan confirmed</label><label><input type="checkbox" name="validation_signoff_confirmed" ${runbook.approvals.validation_signoff_confirmed ? 'checked' : ''}> Validation sign-off confirmed</label><input name="approved_by" value="${escapeHtml(runbook.approvals.approved_by || '')}" placeholder="Confirmed by (optional)"><button class="button secondary" type="submit">Save confirmations</button><p class="form-note" id="approval-note"></p></form>`;
+  container.append(approvalPanel);
+  approvalPanel.querySelector('#approval-form').addEventListener('submit', async event => {
+    event.preventDefault(); const formData = new FormData(event.currentTarget);
+    const payload = Object.fromEntries(['release_engineer_confirmed', 'application_owner_confirmed', 'change_ticket_confirmed', 'rollback_confirmed', 'validation_signoff_confirmed'].map(name => [name, formData.get(name) === 'on']));
+    payload.approved_by = String(formData.get('approved_by') || '').trim();
+    const response = await fetch(`/api/runbooks/${encodeURIComponent(runbook.id)}/approvals`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    const result = await response.json();
+    if (!response.ok) { approvalPanel.querySelector('#approval-note').textContent = result.detail || 'Confirmations could not be saved.'; return; }
+    container.remove(); renderReleaseControls(result); loadDashboard(); loadSavedRunbooks();
+  });
+  const evidencePanel = document.createElement('section');
+  evidencePanel.className = 'control-panel evidence-panel';
+  evidencePanel.innerHTML = `<p class="eyebrow">RELEASE EVIDENCE</p><h3>Preview before external publishing</h3><p>Preview is available now. ArgoCD evidence appears after its read-only connector is configured.</p><p class="runbook-links"><button class="button secondary" type="button" id="preview-confluence">Preview Confluence page</button><a class="download-runbook" target="_blank" rel="noopener" href="/api/runbooks/${encodeURIComponent(runbook.id)}/view">Print / save PDF</a></p><p class="form-note" id="preview-note"></p></section>`;
+  container.append(evidencePanel);
+  evidencePanel.querySelector('#preview-confluence').addEventListener('click', async () => {
+    const response = await fetch(`/api/runbooks/${encodeURIComponent(runbook.id)}/confluence-preview`); const result = await response.json();
+    evidencePanel.querySelector('#preview-note').textContent = response.ok ? `Preview ready for the page “${result.title}”. This uses the same structured content that will be sent to Confluence.` : (result.detail || 'Preview is unavailable.');
+  });
   output.append(container);
 }
 
@@ -124,6 +221,35 @@ async function loadIntegrationStatus() {
   integrationStatus.innerHTML = visible.map(([name, state]) => `<div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(state)}</span></div>`).join('');
 }
 loadIntegrationStatus();
+
+function setConnectionField(id, value) { document.querySelector(id).value = value || ''; }
+async function loadConnectionSettings() {
+  const response = await fetch('/api/admin/integrations');
+  if (!response.ok) { connectionNote.textContent = 'Connection details require an authenticated administrator session.'; return; }
+  integrationSettings = await response.json();
+  setConnectionField('#jira-base-url', integrationSettings.jira.base_url); setConnectionField('#jira-project-key', integrationSettings.jira.project_key);
+  setConnectionField('#github-repository', integrationSettings.github.repository); setConnectionField('#github-production-branch', integrationSettings.github.production_branch); setConnectionField('#github-workflow-file', integrationSettings.github.workflow_file);
+  setConnectionField('#argocd-base-url', integrationSettings.argocd.base_url); setConnectionField('#argocd-application-pattern', integrationSettings.argocd.application_name_pattern);
+  setConnectionField('#confluence-base-url', integrationSettings.confluence.base_url); setConnectionField('#confluence-space-key', integrationSettings.confluence.space_key); setConnectionField('#confluence-parent-page-id', integrationSettings.confluence.parent_page_id);
+}
+connectionForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!integrationSettings) { connectionNote.textContent = 'Load the current connection settings before saving.'; return; }
+  integrationSettings.jira.base_url = document.querySelector('#jira-base-url').value.trim(); integrationSettings.jira.project_key = document.querySelector('#jira-project-key').value.trim();
+  integrationSettings.github.repository = document.querySelector('#github-repository').value.trim(); integrationSettings.github.production_branch = document.querySelector('#github-production-branch').value.trim() || 'prd'; integrationSettings.github.workflow_file = document.querySelector('#github-workflow-file').value.trim() || 'releasepilot-runbook.yml';
+  integrationSettings.argocd.base_url = document.querySelector('#argocd-base-url').value.trim(); integrationSettings.argocd.application_name_pattern = document.querySelector('#argocd-application-pattern').value.trim() || '{component}';
+  integrationSettings.confluence.base_url = document.querySelector('#confluence-base-url').value.trim(); integrationSettings.confluence.space_key = document.querySelector('#confluence-space-key').value.trim(); integrationSettings.confluence.parent_page_id = document.querySelector('#confluence-parent-page-id').value.trim();
+  const response = await fetch('/api/admin/integrations', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(integrationSettings) }); const result = await response.json();
+  if (!response.ok) { connectionNote.textContent = result.detail || 'Connection details could not be saved.'; return; }
+  integrationSettings = result; connectionNote.textContent = 'Connection details saved. Add the matching runtime secrets during deployment, then use Check setup.'; loadIntegrationStatus();
+});
+document.querySelector('#check-connections').addEventListener('click', async () => {
+  const response = await fetch('/api/status'); if (!response.ok) { connectionNote.textContent = 'Connection setup could not be checked.'; return; }
+  const data = await response.json(); const states = data.integrations;
+  connectionNote.textContent = `Jira: ${states.jira}; GitHub: ${states.github}; ArgoCD: ${states.argocd}; Confluence: ${states.confluence}.`;
+  loadIntegrationStatus();
+});
+loadConnectionSettings();
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();

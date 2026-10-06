@@ -38,6 +38,27 @@ jobs:
       - name: Install YAML reader
         run: python -m pip install --disable-pip-version-check PyYAML==6.0.2
 
+      - name: Read Jira release scope when configured
+        env:
+          RELEASE_NUMBER: ${{ inputs.release_number }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
+          RELEASEPILOT_JIRA_TOKEN: ${{ secrets.RELEASEPILOT_JIRA_TOKEN }}
+        run: |
+          # Jira is optional. An unconfigured connector does not block the
+          # Helm-based runbook; it simply contributes no Jira evidence.
+          echo '[]' > jira-issues.json
+          if [ -z "$JIRA_BASE_URL" ] || [ -z "$JIRA_PROJECT_KEY" ] || [ -z "$RELEASEPILOT_JIRA_TOKEN" ]; then
+            echo "Jira is not configured for this repository; continuing with Helm evidence."
+            exit 0
+          fi
+          curl --fail --silent --show-error --get "${JIRA_BASE_URL%/}/rest/api/2/search" \
+            --header "Authorization: Bearer $RELEASEPILOT_JIRA_TOKEN" \
+            --header "Accept: application/json" \
+            --data-urlencode "jql=project = \"${JIRA_PROJECT_KEY}\" AND fixVersion = \"${RELEASE_NUMBER}\" ORDER BY key" \
+            --data-urlencode 'fields=summary,issuetype,components' \
+            | jq '[.issues[] | {key:(.key // ""), summary:(.fields.summary // ""), issue_type:(.fields.issuetype.name // "other" | ascii_downcase | if . == "feature" or . == "bug" or . == "migration" or . == "maintenance" then . else "other" end), components:[(.fields.components // [])[] | .name], requires_downtime:false, requires_data_migration:false}]' > jira-issues.json
+
       - name: Build redacted production release evidence
         env:
           RELEASE_NUMBER: ${{ inputs.release_number }}
@@ -64,11 +85,11 @@ jobs:
               --helm-path "$values_file" \
               --output "releasepilot-changes/${safe_component}.json"
           done < changed-values-files.txt
-          jq -s \
+          jq -s --slurpfile jira jira-issues.json \
             --arg release "$RELEASE_NUMBER" \
             --arg repository "${{ github.repository }}" \
             --arg ref "$GITHUB_SHA" \
-            '{release_number:$release,environment:"production",repository:$repository,git_ref:$ref,helm_paths:map(.helm_paths[])|unique,jira_issues:[],helm_changes:map(.helm_changes[]) }' \
+            '{release_number:$release,environment:"production",repository:$repository,git_ref:$ref,helm_paths:map(.helm_paths[])|unique,jira_issues:$jira[0],helm_changes:map(.helm_changes[]) }' \
             releasepilot-changes/*.json > release-evidence.json
 
       - name: Create or update production runbook
@@ -80,7 +101,7 @@ jobs:
             --manifest release-evidence.json \
             --output-directory runbooks \
             --title "$RELEASE_TITLE" \
-            --additional-information "$ADDITIONAL_INFORMATION"
+              --additional-information "$ADDITIONAL_INFORMATION"
 
       - name: Commit runbook update
         env:
@@ -93,10 +114,30 @@ jobs:
           git commit -m "docs: update ${RELEASE_NUMBER} production runbook"
           git push origin "HEAD:${{ github.ref_name }}"
 
+      - name: Sync committed evidence to ReleasePilot when configured
+        env:
+          RELEASEPILOT_API_URL: ${{ secrets.RELEASEPILOT_API_URL }}
+          RELEASEPILOT_WORKFLOW_TOKEN: ${{ secrets.RELEASEPILOT_WORKFLOW_TOKEN }}
+        run: |
+          # The API uses the release number as its idempotency key: running
+          # this workflow again updates one runbook instead of creating a copy.
+          if [ -z "$RELEASEPILOT_API_URL" ] || [ -z "$RELEASEPILOT_WORKFLOW_TOKEN" ]; then
+            echo "ReleasePilot API sync is not configured; the committed repository runbook remains the source output."
+            exit 0
+          fi
+          curl --fail-with-body --silent --show-error \
+            --request POST "${RELEASEPILOT_API_URL%/}/api/workflows/release-runbook" \
+            --header 'Content-Type: application/json' \
+            --header "X-ReleasePilot-Token: $RELEASEPILOT_WORKFLOW_TOKEN" \
+            --data @release-evidence.json \
+            --output releasepilot-response.json
+
       - name: Retain generated evidence
         uses: actions/upload-artifact@v4
         with:
           name: releasepilot-${{ inputs.release_number }}
           path: |
             release-evidence.json
+            jira-issues.json
+            releasepilot-response.json
             runbooks/*-RUNBOOK.md

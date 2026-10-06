@@ -1,0 +1,99 @@
+name: Validate UAT release scope
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_number:
+        description: Release number / Jira Fix Version being prepared (for example 26.10.09)
+        required: true
+        type: string
+      baseline_ref:
+        description: Previous approved UAT branch, tag, or commit used for comparison
+        required: false
+        default: sit
+        type: string
+      values_file_pattern:
+        description: UAT values-file pattern in this repository
+        required: false
+        default: app_manifest/*/uat/values_uat.yaml
+        type: string
+
+# UAT validation is evidence-only. It cannot commit, deploy, create a
+# production runbook, call the ReleasePilot production API, or publish pages.
+permissions:
+  contents: read
+
+jobs:
+  validate-uat-scope:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install YAML reader
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.2
+
+      - name: Read Jira release scope when configured
+        env:
+          RELEASE_NUMBER: ${{ inputs.release_number }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
+          RELEASEPILOT_JIRA_TOKEN: ${{ secrets.RELEASEPILOT_JIRA_TOKEN }}
+        run: |
+          echo '[]' > jira-issues.json
+          if [ -z "$JIRA_BASE_URL" ] || [ -z "$JIRA_PROJECT_KEY" ] || [ -z "$RELEASEPILOT_JIRA_TOKEN" ]; then
+            echo "Jira is not configured for this repository; continuing with Helm evidence."
+            exit 0
+          fi
+          curl --fail --silent --show-error --get "${JIRA_BASE_URL%/}/rest/api/2/search" \
+            --header "Authorization: Bearer $RELEASEPILOT_JIRA_TOKEN" \
+            --header "Accept: application/json" \
+            --data-urlencode "jql=project = \"${JIRA_PROJECT_KEY}\" AND fixVersion = \"${RELEASE_NUMBER}\" ORDER BY key" \
+            --data-urlencode 'fields=summary,issuetype,components' \
+            | jq '[.issues[] | {key:(.key // ""), summary:(.fields.summary // ""), issue_type:(.fields.issuetype.name // "other" | ascii_downcase | if . == "feature" or . == "bug" or . == "migration" or . == "maintenance" then . else "other" end), components:[(.fields.components // [])[] | .name], requires_downtime:false, requires_data_migration:false}]' > jira-issues.json
+
+      - name: Build redacted UAT validation evidence
+        env:
+          RELEASE_NUMBER: ${{ inputs.release_number }}
+          BASELINE_REF: ${{ inputs.baseline_ref }}
+          VALUES_FILE_PATTERN: ${{ inputs.values_file_pattern }}
+        run: |
+          # This inspects the selected branch only. It creates no Markdown
+          # runbook and does not touch a production release record.
+          mkdir -p releasepilot-changes
+          git diff --name-only "$BASELINE_REF" "$GITHUB_SHA" -- "$VALUES_FILE_PATTERN" > changed-values-files.txt
+          test -s changed-values-files.txt || { echo "No UAT values files changed."; exit 1; }
+          while read -r values_file; do
+            component=$(echo "$values_file" | cut -d/ -f2)
+            safe_component=$(echo "$component" | tr '/ ' '--')
+            git show "$BASELINE_REF:$values_file" > "releasepilot-changes/${safe_component}-baseline.yaml"
+            python releasepilot/scripts/compare_prod_values.py \
+              --current "releasepilot-changes/${safe_component}-baseline.yaml" \
+              --candidate "$values_file" \
+              --component "$component" \
+              --release-number "$RELEASE_NUMBER" \
+              --environment uat \
+              --repository "${{ github.repository }}" \
+              --git-ref "$GITHUB_SHA" \
+              --helm-path "$values_file" \
+              --output "releasepilot-changes/${safe_component}.json"
+          done < changed-values-files.txt
+          jq -s --slurpfile jira jira-issues.json \
+            --arg release "$RELEASE_NUMBER" \
+            --arg repository "${{ github.repository }}" \
+            --arg ref "$GITHUB_SHA" \
+            '{release_number:$release,environment:"uat",repository:$repository,git_ref:$ref,helm_paths:map(.helm_paths[])|unique,jira_issues:$jira[0],helm_changes:map(.helm_changes[]) }' \
+            releasepilot-changes/*.json > uat-validation-evidence.json
+
+      - name: Retain UAT validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: releasepilot-uat-validation-${{ inputs.release_number }}
+          path: |
+            uat-validation-evidence.json
+            jira-issues.json
+            changed-values-files.txt
